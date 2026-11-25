@@ -3,16 +3,23 @@ import express from 'express';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import {
+  createAttachment,
   createCapture,
+  deleteAttachment,
   deleteCapture,
   getCaptureById,
   getMatrixState,
+  incrementAttachmentAuditCount,
+  listAttachments,
   listCaptures,
   MatrixStatePayload,
   saveMatrixState,
   updateCapture,
 } from './src/server/database.ts';
-import { analyzeSketchWithGemini } from './src/server/geminiSketchAnalyzer.ts';
+import {
+  analyzeSketchWithGemini,
+  extractFormatUpdateWithGemini,
+} from './src/server/geminiSketchAnalyzer.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -170,6 +177,127 @@ async function startServer() {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Error al eliminar la captura.',
       });
+    }
+  });
+
+  app.get('/api/attachments', (_req, res) => {
+    try {
+      const attachments = listAttachments();
+      res.json({ attachments });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Error al consultar formatos físicos adjuntos.',
+      });
+    }
+  });
+
+  app.post('/api/attachments', (req, res) => {
+    try {
+      const { fileName, mimeType, fileSize, dataUrl, notes } = req.body as {
+        fileName?: string;
+        mimeType?: string;
+        fileSize?: number;
+        dataUrl?: string;
+        notes?: string;
+      };
+
+      if (!dataUrl || typeof dataUrl !== 'string') {
+        res.status(400).json({ error: 'Debes seleccionar un archivo válido para adjuntar.' });
+        return;
+      }
+
+      const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+|application\/pdf);base64,(.+)$/);
+      if (!match) {
+        res.status(400).json({
+          error: 'Formato de archivo no compatible. Adjunta una imagen (PNG, JPG, WEBP) o un documento PDF.',
+        });
+        return;
+      }
+
+      const saved = createAttachment({
+        fileName: fileName || 'formato-fisico',
+        mimeType: mimeType || match[1],
+        fileSize: typeof fileSize === 'number' ? fileSize : Math.round((match[2].length * 3) / 4),
+        dataUrl,
+        notes: notes || '',
+      });
+      res.status(201).json({ attachment: saved });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Error al guardar el formato físico adjunto.',
+      });
+    }
+  });
+
+  app.patch('/api/attachments/:id/link', (req, res) => {
+    try {
+      const { count } = req.body as { count?: number };
+      const updated = incrementAttachmentAuditCount(
+        req.params.id,
+        typeof count === 'number' && count > 0 ? count : 1
+      );
+      if (!updated) {
+        res.status(404).json({ error: 'Adjunto no encontrado.' });
+        return;
+      }
+      res.json({ attachment: updated });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Error al vincular el formato físico.',
+      });
+    }
+  });
+
+  app.delete('/api/attachments/:id', (req, res) => {
+    try {
+      const deleted = deleteAttachment(req.params.id);
+      if (!deleted) {
+        res.status(404).json({ error: 'Formato físico adjunto no encontrado.' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Error al eliminar el formato físico adjunto.',
+      });
+    }
+  });
+
+  app.post('/api/ai/extract-format-update', async (req, res) => {
+    try {
+      const { fileDataUrl, existingStations, existingOperators } = req.body as {
+        fileDataUrl?: string;
+        existingStations?: string[];
+        existingOperators?: string[];
+      };
+
+      if (!fileDataUrl || typeof fileDataUrl !== 'string') {
+        res.status(400).json({ error: 'Debes adjuntar el formato físico (imagen o PDF).' });
+        return;
+      }
+
+      const match = fileDataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+|application\/pdf);base64,(.+)$/);
+      if (!match) {
+        res.status(400).json({
+          error: 'Formato inválido. Adjunta una imagen (PNG, JPG, WEBP) o un archivo PDF.',
+        });
+        return;
+      }
+
+      const extraction = await extractFormatUpdateWithGemini({
+        mimeType: match[1],
+        fileBase64: match[2],
+        existingStations: Array.isArray(existingStations) ? existingStations : [],
+        existingOperators: Array.isArray(existingOperators) ? existingOperators : [],
+      });
+
+      res.json({ extraction });
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Error al extraer información del formato físico con Gemini.';
+      res.status(500).json({ error: message });
     }
   });
 

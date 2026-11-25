@@ -5,12 +5,15 @@ import {
   calculatePlantMetrics,
   calculateStationCoverage,
   generateInteractiveHtmlTable,
+  generatePrintablePhysicalFormatHtml,
   getCellKey,
   getPolyvalenceTier,
   getTrainingPlanItems,
+  mergeExtractedMatrixIntoCurrent,
   parseDoubleEntryMatrix,
   parseSymbolToLevel,
 } from './matrixLogic';
+import { DEFAULT_MATRIX_METADATA } from '../types/skillsMatrix';
 import { createSeedRecords, SEED_OPERATORS, SEED_STATIONS } from '../data/seedMatrix';
 
 test('calculateOperatorPolyvalence computes exact percentage and certified count', () => {
@@ -100,4 +103,78 @@ test('getTrainingPlanItems prioritizes largest gaps on operator assigned line', 
   assert.equal(items.length, 4);
   assert.ok(items.every((item) => item.currentLevel < item.targetLevel));
   assert.ok(items[0].currentLevel <= items[items.length - 1].currentLevel);
+});
+
+test('mergeExtractedMatrixIntoCurrent appends new operators and stations while updating changed cells in merge_all mode', () => {
+  const records = createSeedRecords();
+  const merged = mergeExtractedMatrixIntoCurrent({
+    currentOperators: SEED_OPERATORS,
+    currentStations: SEED_STATIONS,
+    currentRecordsMap: records,
+    extracted: {
+      operators: ['Carlos Mendoza', 'Laura Domínguez'],
+      stations: ['EST-01 Pre-ensamble Subchasis', 'Calibración Láser'],
+      levels: [
+        [4, 3], // Carlos Mendoza updated on EST-01 (from 2 -> 4) + new station level 3
+        [3, 4], // Laura Domínguez is brand new operator
+      ],
+    },
+    mode: 'merge_all',
+    auditor: 'Ing. Ana Torres',
+    sourceLabel: 'Formato turno A',
+    attachmentId: 'att-123',
+    attachmentName: 'hoja_firmada.jpg',
+  });
+
+  assert.equal(merged.operators.length, SEED_OPERATORS.length + 1);
+  assert.equal(merged.stations.length, SEED_STATIONS.length + 1);
+  assert.equal(merged.stats.newOperatorsCount, 1);
+  assert.equal(merged.stats.newStationsCount, 1);
+
+  const carlosEst01 = merged.recordsMap[getCellKey('op-101', 'est-01')];
+  assert.equal(carlosEst01.level, 4);
+
+  const laura = merged.operators.find((o) => o.name === 'Laura Domínguez')!;
+  const newStation = merged.stations.find((s) => s.name === 'Calibración Láser')!;
+  assert.equal(merged.recordsMap[getCellKey(laura.id, 'est-01')].level, 3);
+  assert.equal(merged.recordsMap[getCellKey(laura.id, newStation.id)].level, 4);
+  assert.ok(merged.addedAuditLogs.length >= 3);
+  assert.equal(merged.addedAuditLogs[0].attachmentName, 'hoja_firmada.jpg');
+});
+
+test('mergeExtractedMatrixIntoCurrent preserves existing non-zero certifications in append_only mode', () => {
+  const records = createSeedRecords();
+  const initialLevel = records[getCellKey('op-101', 'est-01')].level; // 2
+  const merged = mergeExtractedMatrixIntoCurrent({
+    currentOperators: SEED_OPERATORS,
+    currentStations: SEED_STATIONS,
+    currentRecordsMap: records,
+    extracted: {
+      operators: ['Carlos Mendoza', 'Nuevo Operador'],
+      stations: ['EST-01 Pre-ensamble Subchasis'],
+      levels: [[4], [3]],
+    },
+    mode: 'append_only',
+    auditor: 'Supervisor',
+    sourceLabel: 'Formato físico',
+  });
+
+  // Carlos already had level 2 on EST-01 -> preserved in append_only mode
+  assert.equal(merged.recordsMap[getCellKey('op-101', 'est-01')].level, initialLevel);
+  // New operator added with level 3
+  assert.equal(merged.stats.newOperatorsCount, 1);
+  const newOp = merged.operators.find((o) => o.name === 'Nuevo Operador')!;
+  assert.equal(merged.recordsMap[getCellKey(newOp.id, 'est-01')].level, 3);
+});
+
+test('generatePrintablePhysicalFormatHtml includes metadata, stations, and print controls', () => {
+  const html = generatePrintablePhysicalFormatHtml(SEED_STATIONS, {
+    ...DEFAULT_MATRIX_METADATA,
+    area: 'Línea Automotriz B',
+    responsible: 'Ing. Roberto Gil',
+  });
+  assert.match(html, /Línea Automotriz B/);
+  assert.match(html, /Ing\. Roberto Gil/);
+  assert.match(html, /Pre-ensamble Subchasis/);
+  assert.match(html, /window\.print\(\)/);
 });

@@ -3,8 +3,10 @@ import {
   ArrowLeft,
   ClipboardList,
   Code2,
+  FilePlus2,
   Grid3X3,
   Menu,
+  Paperclip,
   Plus,
   ScanSearch,
   Search,
@@ -18,8 +20,12 @@ import {
   COMPETENCY_LEVELS,
   CompetencyLevel,
   CompetencyRecord,
+  DEFAULT_MATRIX_METADATA,
   IndicatorMode,
+  MatrixMetadata,
+  MergeFormatMode,
   Operator,
+  PhysicalFormatAttachment,
   PRODUCTION_LINES,
   ProductionLine,
   SHIFTS,
@@ -38,6 +44,7 @@ import {
   calculatePlantMetrics,
   calculateStationCoverage,
   getCellKey,
+  mergeExtractedMatrixIntoCurrent,
 } from './utils/matrixLogic';
 import { MatrixGrid } from './components/MatrixGrid';
 import { AuditCellDrawer } from './components/AuditCellDrawer';
@@ -45,6 +52,7 @@ import { AuditLogView } from './components/AuditLogView';
 import { HtmlGeneratorView } from './components/HtmlGeneratorView';
 import { SketchStudioView } from './components/SketchStudioView';
 import { AddEntityModal } from './components/AddEntityModal';
+import { FormatImportModal } from './components/FormatImportModal';
 import { LevelIndicator } from './components/LevelIndicator';
 
 const STORAGE_KEY = 'matripol_state_v1';
@@ -54,6 +62,7 @@ interface PersistedState {
   stations: Workstation[];
   recordsMap: Record<string, CompetencyRecord>;
   auditLogs: AuditLogEntry[];
+  metadata?: MatrixMetadata;
 }
 
 function loadInitialState(): PersistedState {
@@ -78,6 +87,7 @@ function loadInitialState(): PersistedState {
     stations: SEED_STATIONS,
     recordsMap: createSeedRecords(),
     auditLogs: SEED_AUDIT_LOGS,
+    metadata: DEFAULT_MATRIX_METADATA,
   };
 }
 
@@ -90,6 +100,10 @@ export default function App() {
     initialState.recordsMap
   );
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(initialState.auditLogs);
+  const [metadata, setMetadata] = useState<MatrixMetadata>(
+    initialState.metadata ?? DEFAULT_MATRIX_METADATA
+  );
+  const [attachments, setAttachments] = useState<PhysicalFormatAttachment[]>([]);
 
   const [activeView, setActiveView] = useState<WorkspaceView>('matrix');
   const [indicatorMode, setIndicatorMode] = useState<IndicatorMode>('icons');
@@ -103,6 +117,7 @@ export default function App() {
     stationId: string;
   } | null>(null);
   const [addModalMode, setAddModalMode] = useState<'operator' | 'station' | null>(null);
+  const [formatModalTab, setFormatModalTab] = useState<'attach' | 'manual' | 'history' | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [dynamicCapture, setDynamicCapture] = useState<CapturedInterfaceItem | null>(null);
   const hasHydratedServerRef = useRef(false);
@@ -111,9 +126,12 @@ export default function App() {
     let active = true;
     (async () => {
       try {
-        const res = await fetch('/api/matrix');
-        if (res.ok && active) {
-          const data = (await res.json()) as PersistedState;
+        const [matrixRes, attachRes] = await Promise.all([
+          fetch('/api/matrix'),
+          fetch('/api/attachments'),
+        ]);
+        if (matrixRes.ok && active) {
+          const data = (await matrixRes.json()) as PersistedState;
           if (
             Array.isArray(data.operators) &&
             Array.isArray(data.stations) &&
@@ -124,6 +142,17 @@ export default function App() {
             setStations(data.stations);
             setRecordsMap(data.recordsMap);
             setAuditLogs(data.auditLogs);
+            if (data.metadata) {
+              setMetadata(data.metadata);
+            }
+          }
+        }
+        if (attachRes.ok && active) {
+          const attData = (await attachRes.json()) as {
+            attachments?: PhysicalFormatAttachment[];
+          };
+          if (Array.isArray(attData.attachments)) {
+            setAttachments(attData.attachments);
           }
         }
       } catch {
@@ -143,6 +172,7 @@ export default function App() {
       stations,
       recordsMap,
       auditLogs,
+      metadata,
     };
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -157,7 +187,7 @@ export default function App() {
     }).catch(() => {
       // Non-blocking sync
     });
-  }, [operators, stations, recordsMap, auditLogs]);
+  }, [operators, stations, recordsMap, auditLogs, metadata]);
 
   const plantMetrics = useMemo(
     () => calculatePlantMetrics(operators, stations, recordsMap),
@@ -337,6 +367,7 @@ export default function App() {
     setStations(SEED_STATIONS);
     setRecordsMap(createSeedRecords());
     setAuditLogs(SEED_AUDIT_LOGS);
+    setMetadata(DEFAULT_MATRIX_METADATA);
     setSearchQuery('');
     setLineFilter('ALL');
     setShiftFilter('ALL');
@@ -348,6 +379,91 @@ export default function App() {
     setLineFilter('ALL');
     setShiftFilter('ALL');
     setOnlyRiskStations(false);
+  };
+
+  const handleMergeFormatData = (payload: {
+    operators: string[];
+    stations: string[];
+    levels: number[][];
+    operatorShifts?: ShiftType[];
+    operatorLines?: ProductionLine[];
+    mode: MergeFormatMode;
+    auditor: string;
+    sourceLabel: string;
+    updateMetadata?: MatrixMetadata;
+    attachment?: PhysicalFormatAttachment | null;
+  }) => {
+    const merged = mergeExtractedMatrixIntoCurrent({
+      currentOperators: operators,
+      currentStations: stations,
+      currentRecordsMap: recordsMap,
+      extracted: {
+        operators: payload.operators,
+        stations: payload.stations,
+        levels: payload.levels,
+        operatorShifts: payload.operatorShifts,
+        operatorLines: payload.operatorLines,
+      },
+      mode: payload.mode,
+      auditor: payload.auditor,
+      sourceLabel: payload.sourceLabel,
+      attachmentId: payload.attachment?.id,
+      attachmentName: payload.attachment?.fileName,
+    });
+
+    setOperators(merged.operators);
+    setStations(merged.stations);
+    setRecordsMap(merged.recordsMap);
+    if (merged.addedAuditLogs.length > 0) {
+      setAuditLogs((prev) => [...merged.addedAuditLogs, ...prev]);
+    }
+    if (payload.updateMetadata) {
+      setMetadata(payload.updateMetadata);
+    }
+    if (payload.attachment && merged.addedAuditLogs.length > 0) {
+      const attId = payload.attachment.id;
+      const count = merged.addedAuditLogs.length;
+      void fetch(`/api/attachments/${attId}/link`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((res: { attachment?: PhysicalFormatAttachment } | null) => {
+          if (res?.attachment) {
+            setAttachments((prev) =>
+              prev.map((a) => (a.id === attId ? res.attachment! : a))
+            );
+          }
+        })
+        .catch(() => {
+          // Non-blocking counter update
+        });
+    }
+
+    setSearchQuery('');
+    setLineFilter('ALL');
+    setShiftFilter('ALL');
+    setOnlyRiskStations(false);
+    return merged.stats;
+  };
+
+  const handleMergeParsedCsv = (parsed: {
+    operators: Operator[];
+    stations: Workstation[];
+    records: Record<string, CompetencyRecord>;
+    convertedSymbolsCount: number;
+  }) => {
+    handleMergeFormatData({
+      operators: parsed.operators.map((o) => o.name),
+      stations: parsed.stations.map((s) => `${s.code} ${s.name}`),
+      levels: parsed.operators.map((op) =>
+        parsed.stations.map((st) => parsed.records[getCellKey(op.id, st.id)]?.level ?? 0)
+      ),
+      mode: 'merge_all',
+      auditor: metadata.responsible || 'Intérprete CSV',
+      sourceLabel: 'Intérprete de matriz CSV',
+    });
   };
 
   const handleIntegrateFromStudio = (payload: {
@@ -746,6 +862,31 @@ export default function App() {
                     <Plus className="w-3.5 h-3.5" aria-hidden="true" />
                     Estación
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFormatModalTab('manual')}
+                    data-testid="open-format-manual-btn"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#0d2d5e] bg-[#e6f0ff] border border-[#93c5fd] rounded-lg hover:bg-blue-100 transition-colors whitespace-nowrap"
+                  >
+                    <FilePlus2 className="w-3.5 h-3.5" aria-hidden="true" />
+                    Desde formato
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFormatModalTab('attach')}
+                    data-testid="open-format-attach-btn"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-[#0d2d5e] rounded-lg hover:bg-[#133b7a] transition-colors whitespace-nowrap"
+                  >
+                    <Paperclip className="w-3.5 h-3.5" aria-hidden="true" />
+                    Adjuntar formato físico
+                    {attachments.length > 0 && (
+                      <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-white/20 text-[10px] font-mono tabular-nums">
+                        {attachments.length}
+                      </span>
+                    )}
+                  </button>
                 </div>
               </section>
 
@@ -761,9 +902,8 @@ export default function App() {
                 recordsMap={recordsMap}
                 indicatorMode={indicatorMode}
                 selectedCell={selectedCell}
-                activeLineLabel={
-                  lineFilter === 'ALL' ? 'Producción Automotriz · Planta Norte' : lineFilter
-                }
+                activeLineLabel={lineFilter === 'ALL' ? metadata.area : lineFilter}
+                metadata={metadata}
                 onSelectCell={(operatorId, stationId) =>
                   setSelectedCell({ operatorId, stationId })
                 }
@@ -777,6 +917,17 @@ export default function App() {
           {activeView === 'studio' && (
             <SketchStudioView
               onIntegrateMatrix={handleIntegrateFromStudio}
+              onMergeMatrix={(payload) => {
+                handleMergeFormatData({
+                  operators: payload.operators,
+                  stations: payload.stations,
+                  levels: payload.levels,
+                  mode: 'merge_all',
+                  auditor: metadata.responsible || 'Digitalizador IA',
+                  sourceLabel: payload.sourceTitle,
+                });
+                setActiveView('matrix');
+              }}
               onOpenDynamicView={(capture) => {
                 setDynamicCapture(capture);
                 setActiveView('dynamic-view');
@@ -825,6 +976,7 @@ export default function App() {
               indicatorMode={indicatorMode}
               onChangeIndicatorMode={setIndicatorMode}
               onApplyParsedMatrix={handleApplyParsedMatrix}
+              onMergeParsedMatrix={handleMergeParsedCsv}
               onResetToBaseline={handleResetToBaseline}
             />
           )}
@@ -847,6 +999,24 @@ export default function App() {
         onClose={() => setAddModalMode(null)}
         onAddOperator={handleAddOperator}
         onAddStation={handleAddStation}
+      />
+
+      {/* Add from Format & Attach Physical Format Modal */}
+      <FormatImportModal
+        open={formatModalTab !== null}
+        initialTab={formatModalTab ?? 'attach'}
+        operators={operators}
+        stations={stations}
+        metadata={metadata}
+        attachments={attachments}
+        onClose={() => setFormatModalTab(null)}
+        onAttachmentCreated={(att) =>
+          setAttachments((prev) => [att, ...prev.filter((p) => p.id !== att.id)])
+        }
+        onAttachmentDeleted={(id) =>
+          setAttachments((prev) => prev.filter((a) => a.id !== id))
+        }
+        onMergeFormatData={handleMergeFormatData}
       />
     </div>
   );

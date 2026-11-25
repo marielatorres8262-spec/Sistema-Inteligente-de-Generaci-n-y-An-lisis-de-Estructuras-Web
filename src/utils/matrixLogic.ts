@@ -1,9 +1,14 @@
 import {
+  AuditLogEntry,
   COMPETENCY_LEVELS,
   CompetencyLevel,
   CompetencyRecord,
   IndicatorMode,
+  MatrixMetadata,
+  MergeFormatMode,
   Operator,
+  ProductionLine,
+  ShiftType,
   Workstation,
 } from '../types/skillsMatrix';
 
@@ -577,4 +582,344 @@ Plataforma interactiva de planta para visualizar, actualizar y auditar el nivel 
 
 5. Intérprete de Matriz y Exportación
 - Módulo capaz de interpretar texto CSV/TSV con símbolos tradicionales (○ ◔ ◑ ◕ ●, I/L/U/O o 0–4) y generar el código HTML5 + CSS + JS autónomo de la tabla interactiva resultante.`;
+}
+
+function normalizeMatchToken(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function parseLeadingCodeAndName(raw: string): { code: string | null; name: string } {
+  const clean = raw.trim();
+  const match = clean.match(/^([A-Z]{2,5}-\d{1,4})\s*(?:[-·:]\s*|\s+)(.+)$/i);
+  if (match) {
+    return { code: match[1].toUpperCase(), name: match[2].trim() };
+  }
+  const codeOnly = clean.match(/^([A-Z]{2,5}-\d{1,4})$/i);
+  if (codeOnly) {
+    return { code: codeOnly[1].toUpperCase(), name: clean };
+  }
+  return { code: null, name: clean };
+}
+
+function nextSequentialCode(existingCodes: string[], prefix: string, startNum: number): string {
+  const used = new Set(existingCodes.map((c) => c.toUpperCase()));
+  let num = startNum;
+  while (used.has(`${prefix}-${String(num).padStart(prefix === 'EST' ? 2 : 3, '0')}`)) {
+    num += 1;
+  }
+  return `${prefix}-${String(num).padStart(prefix === 'EST' ? 2 : 3, '0')}`;
+}
+
+export interface MergeMatrixInput {
+  currentOperators: Operator[];
+  currentStations: Workstation[];
+  currentRecordsMap: Record<string, CompetencyRecord>;
+  extracted: {
+    operators: string[];
+    stations: string[];
+    levels: number[][];
+    operatorShifts?: ShiftType[];
+    operatorLines?: ProductionLine[];
+  };
+  mode: MergeFormatMode;
+  auditor: string;
+  sourceLabel: string;
+  defaultLine?: ProductionLine;
+  defaultShift?: ShiftType;
+  attachmentId?: string;
+  attachmentName?: string;
+}
+
+export interface MergeMatrixOutput {
+  operators: Operator[];
+  stations: Workstation[];
+  recordsMap: Record<string, CompetencyRecord>;
+  addedAuditLogs: AuditLogEntry[];
+  stats: {
+    newOperatorsCount: number;
+    newStationsCount: number;
+    updatedCellsCount: number;
+  };
+}
+
+export function mergeExtractedMatrixIntoCurrent(input: MergeMatrixInput): MergeMatrixOutput {
+  const nextOperators = [...input.currentOperators];
+  const nextStations = [...input.currentStations];
+  const nextRecords: Record<string, CompetencyRecord> = { ...input.currentRecordsMap };
+  const addedAuditLogs: AuditLogEntry[] = [];
+
+  const today = new Date().toISOString().slice(0, 10);
+  const timestamp = new Date().toISOString();
+  const defaultLine: ProductionLine = input.defaultLine ?? 'Línea 1 · Ensamble';
+  const defaultShift: ShiftType = input.defaultShift ?? 'Turno A';
+  const auditorName = input.auditor.trim() || 'Registro desde formato';
+
+  let newStationsCount = 0;
+  let newOperatorsCount = 0;
+  let updatedCellsCount = 0;
+
+  // 1. Resolve / append stations
+  const resolvedStations: Workstation[] = input.extracted.stations.map((rawSt, sIdx) => {
+    const { code, name } = parseLeadingCodeAndName(rawSt);
+    const normName = normalizeMatchToken(name);
+    const existing = nextStations.find(
+      (st) =>
+        (code && st.code.toUpperCase() === code) ||
+        normalizeMatchToken(st.name) === normName ||
+        normalizeMatchToken(`${st.code} ${st.name}`) === normalizeMatchToken(rawSt)
+    );
+    if (existing) {
+      return existing;
+    }
+
+    const generatedCode =
+      code ??
+      nextSequentialCode(
+        nextStations.map((s) => s.code),
+        'EST',
+        nextStations.length + 1
+      );
+    const created: Workstation = {
+      id: `fmt-est-${Date.now()}-${sIdx}`,
+      code: generatedCode,
+      name: name || `Estación ${nextStations.length + 1}`,
+      line: defaultLine,
+      critical: false,
+      minCertified: 2,
+      targetLevel: 3,
+    };
+    nextStations.push(created);
+    newStationsCount += 1;
+
+    // Initialize baseline 0 records for all pre-existing operators on this newly added station
+    for (const op of input.currentOperators) {
+      const k = getCellKey(op.id, created.id);
+      if (!nextRecords[k]) {
+        nextRecords[k] = {
+          operatorId: op.id,
+          stationId: created.id,
+          level: 0,
+          status: 'Pendiente',
+          lastAuditedAt: today,
+          auditor: auditorName,
+          notes: `Estación agregada desde formato (${input.sourceLabel}).`,
+        };
+      }
+    }
+    return created;
+  });
+
+  // 2. Resolve / append operators & apply extracted levels
+  input.extracted.operators.forEach((rawOp, rIdx) => {
+    const { code, name } = parseLeadingCodeAndName(rawOp);
+    const normName = normalizeMatchToken(name);
+    let operator = nextOperators.find(
+      (op) =>
+        (code && op.code.toUpperCase() === code) ||
+        normalizeMatchToken(op.name) === normName
+    );
+    const isNewOperator = !operator;
+
+    if (!operator) {
+      const generatedCode =
+        code ??
+        nextSequentialCode(
+          nextOperators.map((o) => o.code),
+          'OP',
+          101 + nextOperators.length
+        );
+      operator = {
+        id: `fmt-op-${Date.now()}-${rIdx}`,
+        code: generatedCode,
+        name: name || `Trabajador ${nextOperators.length + 1}`,
+        role: 'Operador de Planta',
+        shift: input.extracted.operatorShifts?.[rIdx] ?? defaultShift,
+        line: input.extracted.operatorLines?.[rIdx] ?? defaultLine,
+        hireDate: today,
+      };
+      nextOperators.push(operator);
+      newOperatorsCount += 1;
+
+      // Initialize baseline 0 records for existing stations not covered by this format
+      for (const st of nextStations) {
+        const k = getCellKey(operator.id, st.id);
+        if (!nextRecords[k]) {
+          nextRecords[k] = {
+            operatorId: operator.id,
+            stationId: st.id,
+            level: 0,
+            status: 'Pendiente',
+            lastAuditedAt: today,
+            auditor: auditorName,
+            notes: `Alta desde formato (${input.sourceLabel}).`,
+          };
+        }
+      }
+    }
+
+    const rowLevels = input.extracted.levels[rIdx] ?? [];
+    resolvedStations.forEach((station, sIdx) => {
+      const rawVal = Math.round(Number(rowLevels[sIdx] ?? 0));
+      const newLevel = (Math.max(0, Math.min(4, Number.isFinite(rawVal) ? rawVal : 0))) as CompetencyLevel;
+      const cellKey = getCellKey(operator!.id, station.id);
+      const prevRecord = nextRecords[cellKey];
+      const previousLevel: CompetencyLevel = prevRecord ? prevRecord.level : 0;
+
+      if (input.mode === 'append_only' && !isNewOperator && previousLevel > 0) {
+        return;
+      }
+
+      if (isNewOperator || !prevRecord || previousLevel !== newLevel) {
+        const nextStatus = newLevel === 0 ? 'Pendiente' : 'Vigente';
+        const noteText = input.attachmentName
+          ? `Cargado desde formato "${input.sourceLabel}" (adjunto: ${input.attachmentName}).`
+          : `Cargado desde formato "${input.sourceLabel}".`;
+
+        nextRecords[cellKey] = {
+          operatorId: operator!.id,
+          stationId: station.id,
+          level: newLevel,
+          status: nextStatus,
+          lastAuditedAt: today,
+          auditor: auditorName,
+          notes: noteText,
+        };
+
+        if (previousLevel !== newLevel || (isNewOperator && newLevel > 0)) {
+          updatedCellsCount += 1;
+          addedAuditLogs.push({
+            id: `aud-fmt-${Date.now()}-${rIdx}-${sIdx}`,
+            timestamp,
+            operatorId: operator!.id,
+            operatorName: operator!.name,
+            operatorCode: operator!.code,
+            stationId: station.id,
+            stationCode: station.code,
+            stationName: station.name,
+            previousLevel,
+            newLevel,
+            auditor: auditorName,
+            notes: noteText,
+            status: nextStatus,
+            attachmentId: input.attachmentId,
+            attachmentName: input.attachmentName,
+          });
+        }
+      }
+    });
+  });
+
+  return {
+    operators: nextOperators,
+    stations: nextStations,
+    recordsMap: nextRecords,
+    addedAuditLogs,
+    stats: {
+      newOperatorsCount,
+      newStationsCount,
+      updatedCellsCount,
+    },
+  };
+}
+
+export function generatePrintablePhysicalFormatHtml(
+  stations: Workstation[],
+  metadata: MatrixMetadata
+): string {
+  const displayDate =
+    metadata.date.trim() ||
+    new Date().toLocaleDateString('es-MX', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+  const stationHeaders = stations
+    .map(
+      (st) =>
+        `<th><div class="st-code">${escapeHtml(st.code)}</div><div class="st-name">${escapeHtml(st.name)}</div></th>`
+    )
+    .join('');
+
+  const blankRows = Array.from({ length: 8 }, (_, idx) => {
+    const blankCells = stations
+      .map(
+        () =>
+          `<td class="eval-cell"><div class="circle-guide" aria-hidden="true"></div><div class="lvl-hint">0 · 1 · 2 · 3 · 4</div></td>`
+      )
+      .join('');
+    return `<tr>
+      <td class="num-col">${idx + 1}</td>
+      <td class="name-col"></td>
+      ${blankCells}
+      <td class="extra-col"><div class="circle-guide"></div></td>
+      <td class="poly-col">_____ %</td>
+    </tr>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Formato Físico · Matriz de Habilidades y Polivalencia</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 20px; font-family: system-ui, -apple-system, sans-serif; color: #0f172a; background: #ffffff; }
+    .sheet { max-width: 1120px; margin: 0 auto; }
+    .ctx-banner { display: grid; grid-template-columns: 1.2fr 1fr 1.6fr; gap: 12px; background: #e6f0ff; border: 1.5px solid #93c5fd; border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-size: 12px; }
+    .ctx-banner strong { color: #0d2d5e; }
+    table { width: 100%; border-collapse: collapse; border: 2px solid #0d2d5e; }
+    th, td { border: 1px solid #94a3b8; padding: 8px 6px; text-align: center; }
+    thead th { background: #0d2d5e; color: #ffffff; font-size: 11px; border-color: rgba(255,255,255,0.25); }
+    .st-code { font-family: ui-monospace, monospace; font-size: 9px; color: #bfdbfe; }
+    .st-name { font-weight: 700; margin-top: 2px; }
+    .num-col { width: 36px; font-weight: 700; font-size: 12px; }
+    .name-col { min-width: 180px; text-align: left; }
+    .eval-cell, .extra-col { height: 48px; vertical-align: middle; }
+    .circle-guide { width: 22px; height: 22px; border: 1.5px solid #475569; border-radius: 50%; margin: 0 auto 3px; }
+    .lvl-hint { font-size: 8px; color: #64748b; }
+    .poly-col { width: 76px; font-size: 11px; color: #475569; }
+    .footer { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-top: 16px; font-size: 11px; color: #334155; }
+    .sig { border-top: 1px solid #475569; padding-top: 4px; min-width: 220px; text-align: center; }
+    .print-bar { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+    .print-btn { padding: 7px 14px; background: #0d2d5e; color: #ffffff; border: 0; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    @media print { .print-bar { display: none; } body { padding: 8px; } }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="print-bar">
+      <button class="print-btn" onclick="window.print()">Imprimir formato físico</button>
+    </div>
+    <div class="ctx-banner">
+      <div><strong>Área:</strong> ${escapeHtml(metadata.area)}<br /><strong>Fecha:</strong> ${escapeHtml(displayDate)}</div>
+      <div><strong>Responsable:</strong> ${escapeHtml(metadata.responsible)}<br /><strong>Registro:</strong> Formato físico para captura</div>
+      <div><strong>Objetivo:</strong> ${escapeHtml(metadata.objective)}</div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>No.</th>
+          <th class="name-col">Nombre del Trabajador (Nuevo / Actualizar)</th>
+          ${stationHeaders}
+          <th>Nueva estación:<br />_____________</th>
+          <th>% Poliv.</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${blankRows}
+      </tbody>
+    </table>
+    <div class="footer">
+      <div><strong>Instrucciones:</strong> Rellena cada círculo o anota el nivel (0 = Sin formación, 1 = 25%, 2 = 50%, 3 = 75%, 4 = 100%) y adjunta fotografía o PDF en MatriPol para agregar los datos.</div>
+      <div class="sig">Firma del Supervisor / Responsable</div>
+    </div>
+  </div>
+</body>
+</html>`;
 }

@@ -4,7 +4,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   AuditLogEntry,
   CompetencyRecord,
+  DEFAULT_MATRIX_METADATA,
+  MatrixMetadata,
   Operator,
+  PhysicalFormatAttachment,
   Workstation,
 } from '../types/skillsMatrix.ts';
 import {
@@ -19,6 +22,7 @@ export interface MatrixStatePayload {
   stations: Workstation[];
   recordsMap: Record<string, CompetencyRecord>;
   auditLogs: AuditLogEntry[];
+  metadata?: MatrixMetadata;
 }
 
 export interface DetectedUiElement {
@@ -83,6 +87,17 @@ function getDb(): DatabaseSync {
       status TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS physical_attachments (
+      id TEXT PRIMARY KEY,
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
+      data_url TEXT NOT NULL,
+      notes TEXT NOT NULL,
+      linked_audit_count INTEGER NOT NULL DEFAULT 0,
+      uploaded_at TEXT NOT NULL
+    );
   `);
   dbInstance = db;
   return db;
@@ -96,7 +111,11 @@ export function getMatrixState(): MatrixStatePayload {
 
   if (row) {
     try {
-      return JSON.parse(row.payload) as MatrixStatePayload;
+      const parsed = JSON.parse(row.payload) as MatrixStatePayload;
+      return {
+        ...parsed,
+        metadata: parsed.metadata ?? DEFAULT_MATRIX_METADATA,
+      };
     } catch {
       // Fall through to re-seed if corrupted
     }
@@ -107,6 +126,7 @@ export function getMatrixState(): MatrixStatePayload {
     stations: SEED_STATIONS,
     recordsMap: createSeedRecords(),
     auditLogs: SEED_AUDIT_LOGS,
+    metadata: DEFAULT_MATRIX_METADATA,
   };
   saveMatrixState(seed);
   return seed;
@@ -352,5 +372,86 @@ export function updateCapture(
 export function deleteCapture(id: string): boolean {
   const db = getDb();
   const result = db.prepare('DELETE FROM captured_interfaces WHERE id = ?').run(id);
+  return Number(result.changes) > 0;
+}
+
+function mapAttachmentRow(row: Record<string, unknown>): PhysicalFormatAttachment {
+  return {
+    id: String(row.id),
+    fileName: String(row.file_name),
+    mimeType: String(row.mime_type),
+    fileSize: Number(row.file_size),
+    dataUrl: String(row.data_url),
+    notes: String(row.notes ?? ''),
+    linkedAuditCount: Number(row.linked_audit_count ?? 0),
+    uploadedAt: String(row.uploaded_at),
+  };
+}
+
+export function listAttachments(): PhysicalFormatAttachment[] {
+  const db = getDb();
+  const rows = db
+    .prepare('SELECT * FROM physical_attachments ORDER BY uploaded_at DESC')
+    .all() as Record<string, unknown>[];
+  return rows.map(mapAttachmentRow);
+}
+
+export function createAttachment(input: {
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  dataUrl: string;
+  notes?: string;
+  linkedAuditCount?: number;
+}): PhysicalFormatAttachment {
+  const db = getDb();
+  const record: PhysicalFormatAttachment = {
+    id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    fileName: input.fileName.trim() || 'formato-fisico',
+    mimeType: input.mimeType,
+    fileSize: Math.max(0, Math.round(input.fileSize)),
+    dataUrl: input.dataUrl,
+    notes: (input.notes ?? '').trim(),
+    linkedAuditCount: input.linkedAuditCount ?? 0,
+    uploadedAt: new Date().toISOString(),
+  };
+
+  db.prepare(
+    `INSERT INTO physical_attachments (
+      id, file_name, mime_type, file_size, data_url, notes, linked_audit_count, uploaded_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    record.id,
+    record.fileName,
+    record.mimeType,
+    record.fileSize,
+    record.dataUrl,
+    record.notes,
+    record.linkedAuditCount,
+    record.uploadedAt
+  );
+
+  return record;
+}
+
+export function incrementAttachmentAuditCount(
+  id: string,
+  delta: number
+): PhysicalFormatAttachment | null {
+  const db = getDb();
+  db.prepare(
+    `UPDATE physical_attachments
+     SET linked_audit_count = MAX(0, linked_audit_count + ?)
+     WHERE id = ?`
+  ).run(delta, id);
+  const row = db
+    .prepare('SELECT * FROM physical_attachments WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+  return row ? mapAttachmentRow(row) : null;
+}
+
+export function deleteAttachment(id: string): boolean {
+  const db = getDb();
+  const result = db.prepare('DELETE FROM physical_attachments WHERE id = ?').run(id);
   return Number(result.changes) > 0;
 }

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { ArrowRight, Search } from 'lucide-react';
+import { ArrowRight, Paperclip, Search } from 'lucide-react';
 import { AuditLogEntry, COMPETENCY_LEVELS } from '../types/skillsMatrix';
 
 interface AuditLogViewProps {
@@ -137,6 +137,12 @@ export const AuditLogView: React.FC<AuditLogViewProps> = ({ logs }) => {
                         <div className="text-xs text-slate-600 mt-0.5 line-clamp-2">
                           {entry.notes}
                         </div>
+                        {entry.attachmentName && (
+                          <span className="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-[11px] font-medium text-blue-800">
+                            <Paperclip className="w-3 h-3 shrink-0" aria-hidden="true" />
+                            {entry.attachmentName}
+                          </span>
+                        )}
                       </td>
                     </tr>
                   );

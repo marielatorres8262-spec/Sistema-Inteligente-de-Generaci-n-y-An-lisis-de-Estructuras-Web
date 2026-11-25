@@ -15,6 +15,42 @@ export type WorkspaceView = 'matrix' | 'audits' | 'generator' | 'studio' | 'dyna
 
 export type CaptureStatus = 'Borrador' | 'Integrado' | 'Archivado';
 
+export type MergeFormatMode = 'merge_all' | 'append_only';
+
+export interface MatrixMetadata {
+  area: string;
+  date: string;
+  responsible: string;
+  objective: string;
+}
+
+export const DEFAULT_MATRIX_METADATA: MatrixMetadata = {
+  area: 'Producción Automotriz · Planta Norte',
+  date: '',
+  responsible: 'Ing. Ana Torres',
+  objective:
+    'Evaluar y desarrollar las habilidades del personal para cubrir múltiples procesos operativos.',
+};
+
+export interface PhysicalFormatAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  dataUrl: string;
+  notes: string;
+  linkedAuditCount: number;
+  uploadedAt: string;
+}
+
+export interface FormatExtractionResult {
+  metadata?: Partial<MatrixMetadata>;
+  operators: string[];
+  stations: string[];
+  levels: number[][];
+  summary: string;
+}
+
 export interface DetectedUiElement {
   category: string;
   label: string;
@@ -88,6 +124,8 @@ export interface AuditLogEntry {
   auditor: string;
   notes: string;
   status: CertificationStatus;
+  attachmentId?: string;
+  attachmentName?: string;
 }
 
 export interface LevelDefinition {

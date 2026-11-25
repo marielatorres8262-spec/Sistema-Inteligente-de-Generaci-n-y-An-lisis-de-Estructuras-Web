@@ -20,7 +20,9 @@ import {
   COMPETENCY_LEVELS,
   CompetencyLevel,
   CompetencyRecord,
+  DEFAULT_MATRIX_METADATA,
   IndicatorMode,
+  MatrixMetadata,
   Operator,
   Workstation,
 } from '../types/skillsMatrix';
@@ -41,6 +43,7 @@ interface MatrixGridProps {
   indicatorMode: IndicatorMode;
   selectedCell: { operatorId: string; stationId: string } | null;
   activeLineLabel?: string;
+  metadata?: MatrixMetadata;
   onSelectCell: (operatorId: string, stationId: string) => void;
   onClearFilters: () => void;
 }
@@ -87,7 +90,8 @@ export const MatrixGrid: React.FC<MatrixGridProps> = ({
   recordsMap,
   indicatorMode,
   selectedCell,
-  activeLineLabel = 'Producción Industrial',
+  activeLineLabel,
+  metadata = DEFAULT_MATRIX_METADATA,
   onSelectCell,
   onClearFilters,
 }) => {
@@ -111,11 +115,17 @@ export const MatrixGrid: React.FC<MatrixGridProps> = ({
     );
   }
 
-  const todayFormatted = new Date().toLocaleDateString('es-MX', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  });
+  const todayFormatted =
+    metadata.date.trim() ||
+    new Date().toLocaleDateString('es-MX', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    });
+
+  const displayArea = activeLineLabel || metadata.area || DEFAULT_MATRIX_METADATA.area;
+  const displayResponsible = metadata.responsible.trim() || DEFAULT_MATRIX_METADATA.responsible;
+  const displayObjective = metadata.objective.trim() || DEFAULT_MATRIX_METADATA.objective;
 
   const trainingPlanItems = getTrainingPlanItems(operators, stations, recordsMap, 5);
 
@@ -132,7 +142,7 @@ export const MatrixGrid: React.FC<MatrixGridProps> = ({
           </div>
           <div className="text-xs leading-snug min-w-0">
             <div className="text-slate-800 truncate">
-              <strong className="text-[#0d2d5e]">Área:</strong> {activeLineLabel}
+              <strong className="text-[#0d2d5e]">Área:</strong> {displayArea}
             </div>
             <div className="text-slate-700 font-mono tabular-nums mt-0.5">
               <strong className="font-sans text-[#0d2d5e]">Fecha:</strong> {todayFormatted}
@@ -146,7 +156,7 @@ export const MatrixGrid: React.FC<MatrixGridProps> = ({
           </div>
           <div className="text-xs leading-snug min-w-0">
             <div className="text-slate-800 truncate">
-              <strong className="text-[#0d2d5e]">Responsable:</strong> Ing. Ana Torres
+              <strong className="text-[#0d2d5e]">Responsable:</strong> {displayResponsible}
             </div>
             <div className="text-[11px] text-slate-600 mt-0.5">
               Supervisión de Planta
@@ -159,7 +169,7 @@ export const MatrixGrid: React.FC<MatrixGridProps> = ({
             <Target className="w-5 h-5" aria-hidden="true" />
           </div>
           <p className="text-xs text-slate-800 leading-snug">
-            <strong className="text-[#0d2d5e]">Objetivo:</strong> Evaluar y desarrollar las habilidades del personal para cubrir múltiples procesos operativos.
+            <strong className="text-[#0d2d5e]">Objetivo:</strong> {displayObjective}
           </p>
         </div>
       </section>

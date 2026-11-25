@@ -39,6 +39,12 @@ interface SketchStudioViewProps {
     records: Record<string, CompetencyRecord>;
     sourceTitle: string;
   }) => void;
+  onMergeMatrix?: (payload: {
+    operators: string[];
+    stations: string[];
+    levels: number[][];
+    sourceTitle: string;
+  }) => void;
   onOpenDynamicView?: (capture: CapturedInterfaceItem) => void;
 }
 
@@ -86,6 +92,7 @@ async function fileToOptimizedDataUrl(file: File): Promise<string> {
 
 export const SketchStudioView: React.FC<SketchStudioViewProps> = ({
   onIntegrateMatrix,
+  onMergeMatrix,
   onOpenDynamicView,
 }) => {
   const [imageDataUrl, setImageDataUrl] = useState<string>('');
@@ -301,6 +308,23 @@ export const SketchStudioView: React.FC<SketchStudioViewProps> = ({
     } catch (err) {
       setAnalysisError(
         err instanceof Error ? err.message : 'No se pudo integrar la matriz.'
+      );
+    }
+  };
+
+  const handleMergeIntoCurrentMatrix = async (capture: CapturedInterfaceItem) => {
+    if (!capture.parsedMatrix || !onMergeMatrix) return;
+    try {
+      await handleUpdateCapture(capture.id, { status: 'Integrado' });
+      onMergeMatrix({
+        operators: capture.parsedMatrix.operators,
+        stations: capture.parsedMatrix.stations,
+        levels: capture.parsedMatrix.levels,
+        sourceTitle: capture.title,
+      });
+    } catch (err) {
+      setAnalysisError(
+        err instanceof Error ? err.message : 'No se pudo agregar la información a la matriz.'
       );
     }
   };
@@ -635,13 +659,22 @@ export const SketchStudioView: React.FC<SketchStudioViewProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {activeCapture.parsedMatrix && onMergeMatrix && (
+                    <button
+                      type="button"
+                      onClick={() => handleMergeIntoCurrentMatrix(activeCapture)}
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors whitespace-nowrap"
+                    >
+                      Agregar a matriz actual
+                    </button>
+                  )}
                   {activeCapture.parsedMatrix && (
                     <button
                       type="button"
                       onClick={() => handleIntegrateIntoMatrix(activeCapture)}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors whitespace-nowrap"
+                      className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-300 rounded-lg hover:bg-emerald-100 transition-colors whitespace-nowrap"
                     >
-                      Integrar en Matriz
+                      Reemplazar matriz
                     </button>
                   )}
 

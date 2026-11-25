@@ -219,3 +219,158 @@ Requisitos de salida:
     parsedMatrix: normalizedMatrix,
   };
 }
+
+export interface ExtractFormatUpdateInput {
+  fileBase64: string;
+  mimeType: string;
+  existingStations: string[];
+  existingOperators: string[];
+}
+
+export interface ExtractFormatUpdateOutput {
+  metadata: {
+    area: string;
+    date: string;
+    responsible: string;
+    objective: string;
+  };
+  operators: string[];
+  stations: string[];
+  levels: number[][];
+  summary: string;
+}
+
+export async function extractFormatUpdateWithGemini(
+  input: ExtractFormatUpdateInput
+): Promise<ExtractFormatUpdateOutput> {
+  const ai = getGeminiClient();
+
+  const prompt = `Analiza este formato físico (fotografía, escaneo o PDF) de Matriz de Habilidades y Polivalencia.
+Estaciones actuales registradas en el sistema: ${input.existingStations.join(', ') || 'Ninguna'}.
+Trabajadores actuales registrados en el sistema: ${input.existingOperators.join(', ') || 'Ninguno'}.
+
+Extrae TODA la información nueva o actualizada visible en el formato físico:
+1. Metadatos de encabezado si aparecen (área, fecha, responsable, objetivo). Si alguno no aparece, devuélvelo como cadena vacía "".
+2. Lista de trabajadores (operators) presentes en el formato (usa nombres completos legibles).
+3. Lista de estaciones de trabajo (stations) presentes en los encabezados de columna del formato. Cuando coincidan con estaciones existentes, respeta el código o nombre existente para facilitar la integración.
+4. Matriz numérica levels (filas = operadores, columnas = estaciones) con enteros del 0 al 4:
+   - 0 = círculo vacío ○, sin marca, 0% o "0"
+   - 1 = cuarto de círculo ◔, "I", "1" o 25%
+   - 2 = medio círculo ◑, "L", "2" o 50%
+   - 3 = tres cuartos ◕, "U", "3" o 75%
+   - 4 = círculo lleno ●, "O", "4", verde completo o 100%
+5. Un breve resumen en español de los nuevos registros o cambios detectados.`;
+
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: input.mimeType,
+              data: input.fileBase64,
+            },
+          },
+          { text: prompt },
+        ],
+      },
+      config: {
+        systemInstruction:
+          'Eres un especialista en digitalización de formatos industriales (Matrices de Polivalencia ILUO). Extrae con máxima precisión nombres, estaciones, metadatos y niveles 0-4 desde documentos físicos o manuscritos.',
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            area: { type: Type.STRING },
+            date: { type: Type.STRING },
+            responsible: { type: Type.STRING },
+            objective: { type: Type.STRING },
+            operators: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            stations: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            levels: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.ARRAY,
+                items: { type: Type.INTEGER },
+              },
+            },
+            summary: { type: Type.STRING },
+          },
+          required: ['operators', 'stations', 'levels', 'summary'],
+        },
+      },
+    });
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    if (rawMsg.includes('403') || rawMsg.includes('PERMISSION_DENIED') || rawMsg.includes('free tier')) {
+      throw new Error(
+        'La API de Gemini devolvió 403. Verifica tu clave API y facturación en el panel Settings > Secrets.'
+      );
+    }
+    if (rawMsg.includes('429') || rawMsg.includes('RESOURCE_EXHAUSTED')) {
+      throw new Error(
+        'Cuota de la API de Gemini excedida (429). Verifica tu plan en Settings > Secrets.'
+      );
+    }
+    if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('400')) {
+      throw new Error(
+        'La clave GEMINI_API_KEY es inválida o el archivo adjunto no pudo ser procesado. Revisa Settings > Secrets.'
+      );
+    }
+    throw new Error(`Error al analizar el formato físico con Gemini: ${rawMsg}`);
+  }
+
+  const rawText = (response.text ?? '').trim();
+  if (!rawText) {
+    throw new Error('Gemini devolvió una respuesta vacía al analizar el formato físico.');
+  }
+
+  let rawParsed: {
+    area?: string;
+    date?: string;
+    responsible?: string;
+    objective?: string;
+    operators?: string[];
+    stations?: string[];
+    levels?: number[][];
+    summary?: string;
+  };
+  try {
+    rawParsed = JSON.parse(extractJsonFromModelText(rawText));
+  } catch {
+    throw new Error('La respuesta de Gemini no tuvo formato JSON válido. Intenta nuevamente.');
+  }
+
+  const normalized = normalizeExtractedMatrix({
+    operators: rawParsed.operators ?? [],
+    stations: rawParsed.stations ?? [],
+    levels: rawParsed.levels ?? [],
+  });
+
+  if (!normalized) {
+    throw new Error(
+      'No se detectaron filas de trabajadores y columnas de estaciones en el archivo adjunto. Puedes capturar los datos manualmente usando el archivo como respaldo.'
+    );
+  }
+
+  return {
+    metadata: {
+      area: (rawParsed.area ?? '').trim(),
+      date: (rawParsed.date ?? '').trim(),
+      responsible: (rawParsed.responsible ?? '').trim(),
+      objective: (rawParsed.objective ?? '').trim(),
+    },
+    operators: normalized.operators,
+    stations: normalized.stations,
+    levels: normalized.levels,
+    summary: (rawParsed.summary ?? '').trim() || 'Información extraída del formato físico.',
+  };
+}

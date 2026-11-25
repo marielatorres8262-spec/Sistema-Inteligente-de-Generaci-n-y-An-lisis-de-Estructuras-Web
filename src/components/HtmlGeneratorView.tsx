@@ -25,6 +25,12 @@ interface HtmlGeneratorViewProps {
     records: Record<string, CompetencyRecord>;
     convertedSymbolsCount: number;
   }) => void;
+  onMergeParsedMatrix?: (parsed: {
+    operators: Operator[];
+    stations: Workstation[];
+    records: Record<string, CompetencyRecord>;
+    convertedSymbolsCount: number;
+  }) => void;
   onResetToBaseline: () => void;
 }
 
@@ -37,6 +43,7 @@ export const HtmlGeneratorView: React.FC<HtmlGeneratorViewProps> = ({
   indicatorMode,
   onChangeIndicatorMode,
   onApplyParsedMatrix,
+  onMergeParsedMatrix,
   onResetToBaseline,
 }) => {
   const [activeTab, setActiveTab] = useState<GeneratorTab>('html');
@@ -74,14 +81,21 @@ export const HtmlGeneratorView: React.FC<HtmlGeneratorViewProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleInterpretMatrix = () => {
+  const handleInterpretMatrix = (mergeIntoCurrent: boolean) => {
     try {
       setParseError('');
       const parsed = parseDoubleEntryMatrix(rawMatrixText);
-      onApplyParsedMatrix(parsed);
-      setParseFeedback(
-        `Matriz interpretada: ${parsed.operators.length} operadores, ${parsed.stations.length} estaciones y ${parsed.convertedSymbolsCount} símbolos convertidos a indicadores dinámicos.`
-      );
+      if (mergeIntoCurrent && onMergeParsedMatrix) {
+        onMergeParsedMatrix(parsed);
+        setParseFeedback(
+          `Información agregada a la matriz actual: ${parsed.operators.length} operador(es) y ${parsed.stations.length} estación(es) procesados.`
+        );
+      } else {
+        onApplyParsedMatrix(parsed);
+        setParseFeedback(
+          `Matriz interpretada: ${parsed.operators.length} operadores, ${parsed.stations.length} estaciones y ${parsed.convertedSymbolsCount} símbolos convertidos a indicadores dinámicos.`
+        );
+      }
       setActiveTab('html');
     } catch (err) {
       setParseFeedback('');
@@ -293,7 +307,7 @@ export const HtmlGeneratorView: React.FC<HtmlGeneratorViewProps> = ({
             <p className="text-xs text-slate-500">
               Equivalencias admitidas: ○ / 0 (0%) · ◔ / I / 1 (25%) · ◑ / L / 2 (50%) · ◕ / U / 3 (75%) · ● / O / 4 (100%)
             </p>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
               <button
                 type="button"
                 onClick={onResetToBaseline}
@@ -301,13 +315,23 @@ export const HtmlGeneratorView: React.FC<HtmlGeneratorViewProps> = ({
               >
                 Restaurar planta base
               </button>
+              {onMergeParsedMatrix && (
+                <button
+                  type="button"
+                  onClick={() => handleInterpretMatrix(true)}
+                  data-testid="merge-interpreted-matrix-button"
+                  className="px-4 py-2 text-xs font-medium text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors"
+                >
+                  Agregar a matriz actual
+                </button>
+              )}
               <button
                 type="button"
-                onClick={handleInterpretMatrix}
+                onClick={() => handleInterpretMatrix(false)}
                 data-testid="interpret-matrix-button"
                 className="px-4 py-2 text-xs font-medium text-white bg-blue-700 rounded-lg hover:bg-blue-800 transition-colors"
               >
-                Interpretar y convertir a barras dinámicas
+                Reemplazar matriz actual
               </button>
             </div>
           </div>
