@@ -1,0 +1,8 @@
+{
+  "name": "Remix MatriPol · Matriz de Habilidades y Polivalencia",
+  "description": "Plataforma industrial para visualizar, actualizar y auditar el nivel de competencia técnica de operadores por estación de trabajo, con indicadores dinámicos de progreso y generador de tabla HTML interactiva.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
